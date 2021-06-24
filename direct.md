@@ -172,6 +172,17 @@ resources :chatrooms, onyl: %i[create, show], shallow: true do
 end
 ```
 
+生成されるルーティング...
+
+
+```
+chatroom_messages GET    /chatrooms/:chatroom_id/messages(.:format)    messages#index
+                  POST   /chatrooms/:chatroom_id/messages(.:format)    messages#create
+new_chatroom_message GET    /chatrooms/:chatroom_id/messages/new(.:format)    messages#new
+        chatrooms POST   /chatrooms(.:format)                            chatrooms#create
+          chatroom GET    /chatrooms/:id(.:format)                    chatrooms#show
+```
+
 ### messages_controller
 
 次にmessages_controllerを作成し、以下の様にする
@@ -203,6 +214,8 @@ class MessagesController < ApplicationController
 
   def message_update_params
     params.require(:message).permit(:body
+  end
+end
 ```
 
 これらの操作ができるのは、current_userのみなので`current_user.messages`と所有者を絞った上で検索させる。
@@ -221,7 +234,7 @@ class Chatroom < ApplicationRecord
 
   def self.chatroom_for_users(users)
     user_ids = users.map(&:id).sort
-    name = "#{user_ids.join(":")}"
+    name = user_ids.join(":").to_s
 
     if chatroom = where(name: name).first
       chatroom
@@ -245,7 +258,7 @@ current_userがAさんとチャットする場合、すでにcurrent_user.idとA
 
 viewで使いたいメソッドはModelに書くのではなく、Decoratorファイルに書くということ。Modelの肥大化防止にもつながる
 
-[Decoratorやそのgem`draper`について学んだことはこちらにまとめました。]()
+[Decoratorやそのgem`draper`について学んだことはこちらにまとめました。](https://github.com/koteharyu/TIL/blob/main/insta_clone/17_direct_messages/decorator.md)
 
 では、早速`draper`を導入する。なお、gemのインストールは済んだものとする。
 
@@ -257,7 +270,7 @@ viewで使いたいメソッドはModelに書くのではなく、Decoratorフ�
 class MessageDecorator < ApplicationDecorator
   delegate_all
   def created_at
-    helper.content_tag :span, class: 'time' do
+    helpers.content_tag :span, class: 'time' do
       object.created_at.strftime('%Y-%m-%d %H:%M:%S')
     end
   end
@@ -316,14 +329,14 @@ li.media.mb-3.border-bottom.p-2 id="message-#{message.id}"
       = link_to message.user.name, user_path(message.user)
     = image_tag message.user.avatar_url, class: 'mr-3 rounded-circle', size: '50x50'
   .media-body
-    = simple_formats(message.body)
+    = simple_format(message.body)
     div.text-right
       = message.decorate.created_at  # decoratorの出番！
     div.text-right
       - if current_user&.onw?(message)
         = link_to message_path(message), class: 'mr-3', method: :delete, data: { confirm: '本当に削除しますか?' }, remote: true do
           = icon 'far', 'trash-alt', class: 'fa-sm'
-        = link_to message_path(message), remote: true do
+        = link_to edit_message_path(message), remote: true do
           = icon 'far', 'edit', class: 'fa-sm'
 ```
 
@@ -336,7 +349,7 @@ li.media.mb-3.border-bottom.p-2 id="message-#{message.id}"
       .modal-header
         h5.modal-title メッセージ編集
         button.close aria-label="Close" data-dismiss="modal" type="button"
-          span aria-hidden="true"
+          span aria-hidden="true" x
       .modal-body
         = render 'form', chatroom: nil, message: @message
 ```
@@ -360,7 +373,8 @@ li.media.mb-3.border-bottom.p-2 id="message-#{message.id}"
 ### messages/edit.js
 
 ```
-| $('#modal-container').html("#{j render('modal_form', message: @message)}")
+| $("#modal-container").html("#{escape_javascript(render 'modal_form', message: @message)}");
+| $("#message-edit-modal").modal('show');
 ```
 
 ### messages/update.js
@@ -455,7 +469,7 @@ end
   = image_tag chatroom.users.reject { |user| user == current_user }.sample.avatar.url, size: '40x40', class: 'rounded-circle mr-1'
   div
     p.font-weight-bold = raw(chatroom.users.reject { |user| user == current_user }.map{ |user| (link_to(user.name, user_path(user)))}.join(','))
-    p.fond-weight-light = link_to chatroom.messages.last.&.body&.truncate(30) || 'まだメッセージがありません', chatroom_path(chatroom)
+    p.fond-weight-light = link_to chatroom.messages.last&.body&.truncate(30) || 'まだメッセージがありません', chatroom_path(chatroom)
 hr
 ```
 
@@ -476,7 +490,7 @@ hr
           = render @chatrooms
     .col-md-6.col-12.offset-md-3.mb-3
       = paginate @chatrooms
-#create-chatroom-modal.modal.fade tabindex="1"
+#create-chatroom-modal.modal.fade tabindex="-1"
   = form_with model: Chatroom.new, local: true do |f|
     .modal-dialog
       .modal-content
@@ -561,7 +575,7 @@ p.font-weight-light = link_to chatroom.decorate.message_text, chatroom_path(chat
           h2 チャットルーム
           = link_to "参加者一覧", "#", class: 'btn btn-raised btn-primary', data: { toogle: 'modal', target: '#chatroom-users'}
           ////
-#chatroom-users.modal.fade.tabindex="-1"
+#chatroom-users.modal.fade tabindex="-1"
   .modal-dialog
     .modal-content
       .modal-header
@@ -581,7 +595,7 @@ N+1問題解消
 
 ```ruby
 def index
-  @chatrooms = current_user.chatrooms.includes(:users, :messages).page(params[:page]).order(created_at: :desc)
+  @chatrooms = current_user.chatrooms.includes(:users, messages: :user).page(params[:page]).order(created_at: :desc)
 end
 
 def show
@@ -591,13 +605,24 @@ end
 
 ## commit
 
-viewで使うロジックをmodelに寄せる
+viewで使うロジックをmodelに寄せる && デコり
 
 ### models/chatroom
 
 ```ruby
 def users_excluding(user)
   users.reject { |u| u == user }
+end
+```
+
+```ruby
+# decorators/chatroom_decorator.rb
+
+class ChatroomDecorator < ApplicationDecorator
+  delegate_all
+  def message_text
+    messages.last&.body&.truncate(30) || 'まだメッセージがありません'
+  end
 end
 ```
 
@@ -696,35 +721,37 @@ ActionCable
 ```js
 # javascripts/cable/chatroom.js
 
-$(function(){
-  if(($"#chatroom").length > 0) {
+$(function () {
+  if ($("#chatroom").length > 0) {
     const chatroomId = $("#chatroom").data("chatroomId")
     const currentUserId = $("#chatroom").data("currentUserId")
-    App.chatrooms = App.cable.subscriptions.create({ channel: "ChatroomChannel", chatroom_id: chatroomId}, {
-      connected: function(){
+    App.chatrooms = App.cable.subscriptions.create({ channel: "ChatroomChannel", chatroom_id: chatroomId }, {
+      connected: function () {
         console.log("connected")
       },
-      disconnected: function(){
+      disconnected: function () {
         console.log("disconnected")
       },
-      received: function(data) {
-        switch(data.type) {
+      received: function (data) {
+        switch (data.type) {
           case "create":
             $('#message-box').append(data.html);
-            if($('#message-${data.message.id}').data("senderId") != currentUserId) {
-              $('#message-${data.message.id').find('.crud-area').hide()
+            if ($(`#message-${data.message.id}`).data("senderId") != currentUserId) {
+              // 自分の投稿じゃない場合は編集・削除ボタンを非表示にする
+              $(`#message-${data.message.id}`).find('.crud-area').hide()
             }
-            &('.input-message-box').val('');
+            $('.input-message-body').val('');
             break;
           case "update":
-            $('#message-${data.message.id}').replaceWith(data.html);
-            if($('#message-${data.message.id}').data("senderId") != currentUserId) {
-              $('#message-${data.message.id}').find('.crud-area').hide()
+            $(`#message-${data.message.id}`).replaceWith(data.html);
+            if ($(`#message-${data.message.id}`).data("senderId") != currentUserId) {
+              // 自分の投稿じゃない場合は編集・削除ボタンを非表示にする
+              $(`#message-${data.message.id}`).find('.crud-area').hide()
             }
-            $('#message-edit-modal').modal('hide');
+            $("#message-edit-modal").modal('hide');
             break;
           case "delete":
-            $('#message-${data.message.id').remove();
+            $(`#message-${data.message.id}`).remove();
             break;
         }
       },
@@ -746,14 +773,15 @@ module ApplicationCable
       self.current_user = find_verified_user
     end
 
-  private
-  def find_verified_user
-    if verified_user = User.find_by(id: cookies.signed['user.id'])
-      verified_user
-    else
-      reject_unauthorized_connection
+    private
+
+    def find_verified_user
+      if (verified_user = User.find_by(id: cookies.signed['user.id']))
+        verified_user
+      else
+        reject_unauthorized_connection
+      end
     end
-  end
   end
 end
 ```
@@ -797,6 +825,16 @@ def create
   head :ok
 end
 
+def update
+  @message = current_user.messages.find(params[:id])
+  @message.update(message_update_params)
+  ActionCable.server.broadcast(
+    "chatroom_#{@message.chatroom_id}",
+    type: :update, html: (render_to_string partial: 'message', locals: { message: @message }, layout: false), message: @message.as_json
+  )
+  head :ok
+end
+
 def destroy
   @message = current_user.messages.find(params[:id])
   @message.destroy!
@@ -805,10 +843,11 @@ def destroy
     "chatroom_#{@message.chatroom_id}",
     { type: :delete, html: (render_to_string partial: 'message', local: { message: @message }, layout: false), message: @message.as_json }
   )
+  head :ok
 end
 ```
 
-### ser_sessions_controller
+### user_sessions_controller
 
 ```ruby
 # user_sessions_controller
